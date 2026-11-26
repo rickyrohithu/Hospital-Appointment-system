@@ -69,18 +69,35 @@ async def _check_elevenlabs() -> dict:
 
 
 async def _check_gemini() -> dict:
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if groq_key:
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+                async with session.get("https://api.groq.com/openai/v1/models", headers={"Authorization": f"Bearer {groq_key}"}) as resp:
+                    return {"reachable": resp.status == 200, "provider": "groq", "model": os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")}
+        except Exception as exc:
+            return {"reachable": False, "provider": "groq", "error": str(exc)[:180]}
+    if openai_key:
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+                async with session.get("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {openai_key}"}) as resp:
+                    return {"reachable": resp.status == 200, "provider": "openai", "model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini")}
+        except Exception as exc:
+            return {"reachable": False, "provider": "openai", "error": str(exc)[:180]}
+
     from google import genai
     model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
     try:
-        client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
+        client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
         resp = await asyncio.to_thread(
             client.models.generate_content,
             model=model_name,
             contents="ping",
         )
-        return {"reachable": bool(resp.text), "model": model_name}
+        return {"reachable": bool(resp.text), "provider": "gemini", "model": model_name}
     except Exception as exc:
-        return {"reachable": False, "model": model_name, "error": str(exc)[:180]}
+        return {"reachable": False, "provider": "gemini", "model": model_name, "error": str(exc)[:180]}
 
 
 # ---------------------------------------------------------------------------

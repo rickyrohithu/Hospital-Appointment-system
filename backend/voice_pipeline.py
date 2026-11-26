@@ -53,6 +53,14 @@ from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.google.llm import GoogleLLMService
+try:
+    from pipecat.services.groq.llm import GroqLLMService
+except ImportError:
+    GroqLLMService = None
+try:
+    from pipecat.services.openai.llm import OpenAILLMService
+except ImportError:
+    OpenAILLMService = None
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
@@ -312,18 +320,34 @@ async def run_voice_pipeline(websocket, session_id: str, broadcast_fn=None):
         )
         logger.info(f"[{session_id}] ElevenLabs TTS initialized (model=eleven_turbo_v2_5, rate=16000)")
 
-        llm = GoogleLLMService(
-            api_key=os.environ["GOOGLE_API_KEY"],
-            model=primary_model,
-            stream_idle_timeout_secs=25.0,
-            retry_on_timeout=True,
-        )
-        logger.info(f"[{session_id}] Google LLM initialized (model={primary_model})")
+        groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+        openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+
+        if groq_key and GroqLLMService is not None:
+            groq_model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+            llm = GroqLLMService(api_key=groq_key, model=groq_model)
+            logger.info(f"[{session_id}] Using Groq LLM (model={groq_model})")
+        elif openai_key and OpenAILLMService is not None:
+            openai_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+            llm = OpenAILLMService(api_key=openai_key, model=openai_model)
+            logger.info(f"[{session_id}] Using OpenAI LLM (model={openai_model})")
+        else:
+            llm = GoogleLLMService(
+                api_key=os.environ["GOOGLE_API_KEY"],
+                model=primary_model,
+                stream_idle_timeout_secs=20.0,
+                retry_on_timeout=True,
+            )
+            logger.info(f"[{session_id}] Google LLM initialized (model={primary_model})")
 
         for tool_name in ("check_doctor_availability", "book_appointment", "cancel_appointment"):
             llm.register_function(tool_name, _make_tool_handler(tool_name, broadcast_fn, session_id))
 
-        messages = [{"role": "system", "content": _build_system_prompt()}]
+        welcome_greeting = "Hello, thank you for calling Meridian Health Care Desk. How may I assist you today?"
+        messages = [
+            {"role": "system", "content": _build_system_prompt()},
+            {"role": "assistant", "content": welcome_greeting},
+        ]
         context = LLMContext(messages, tools=_build_tools_schema())
         context_aggregator = LLMContextAggregatorPair(
             context,
@@ -402,14 +426,21 @@ async def run_voice_pipeline(websocket, session_id: str, broadcast_fn=None):
 
         @transport.event_handler("on_client_connected")
         async def on_connected(transport_, client):
-            logger.info(f"[{session_id}] Client connected; signaling bot_ready and starting greeting")
+            logger.info(f"[{session_id}] Client connected; signaling bot_ready and starting instant greeting")
             try:
                 await websocket.send_text(json.dumps({"type": "bot_ready", "session_id": session_id}))
             except Exception:
                 pass
             if broadcast_fn:
                 await broadcast_fn({"type": "call_started", "session_id": session_id})
-            await task.queue_frames([LLMRunFrame()])
+                await broadcast_fn({
+                    "type": "transcript",
+                    "speaker": "bot",
+                    "text": welcome_greeting,
+                    "session_id": session_id,
+                })
+            # Speak the welcome greeting immediately through TTS (zero latency, no LLM wait)
+            await task.queue_frames([TTSSpeakFrame(welcome_greeting)])
 
         @transport.event_handler("on_client_disconnected")
         async def on_disconnected(transport_, client):
